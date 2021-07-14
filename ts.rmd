@@ -1,0 +1,627 @@
+---
+title: "Traffic Forecasting"
+author: "BRACU"
+date: '`r Sys.Date()`'
+output:
+  rmdformats::material:
+    highlight: kate
+    self_contained: true
+    code_folding: show
+    thumbnails: true
+    gallery: true
+    fig_width: 4
+    fig_height: 4
+    df_print: kable
+    
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+
+# import some libraries 
+library(knitr)
+library(rmdformats)
+library(reactable)
+library(shinyWidgets)
+library(shiny)
+library(apexcharter)
+library(dygraphs)
+library(xts)
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tibble)
+library(lubridate)
+library(forecast)
+library(tsibble)
+library(fable)
+library(fabletools)
+library(fable.prophet)
+library(readr)
+library(feasts)
+library(fasster)
+
+# mute dplyr messages 
+options(dplyr.summarise.inform = FALSE)
+
+
+# load saved ( save.image("my_work_space.RData")) workspace with all data and models early computed to make the report fast 
+# 
+load("my_work_space.RData")
+
+```
+
+
+```{css, echo=FALSE}
+/* some css modification */
+.col-xs-9 {
+    width: 85%;
+}
+
+.col-xs-3 {
+    width: 15%;
+}
+
+```
+
+<!-- import fontawesome icons -->
+<link href="https://use.fontawesome.com/releases/v5.0.7/css/all.css" rel="stylesheet">
+
+
+#  <i class="fas fa-play-circle"></i> Introduction  
+
+
+<!-- include the image in introduction --> 
+<div 
+    style="background-image: url('https://encrypted-tbn0.gstatic.com/images?q=tbn%3AANd9GcSrglCCiJlqlWoC4KEmwK7bfLfEI3boyX93kA&usqp=CAU'); 
+background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center center;
+    min-height: 155px;
+    position: relative;
+    z-index: 3;">&nbsp;
+</div>
+
+
+## Traffic Forecasting Using Time-series Analysis
+
+
+The goal of this project is to implement forecasting models to predict the volume of road traffic within 24 hours.  
+
+We will develop several models (including ARIMA) then we compare the performances to select the best algorithm for each route
+
+
+#  <i class="fas fa-cogs"></i> Data Preparation 
+
+## The dataset 
+
+We use R [readr](https://readr.tidyverse.org/) package which is part of tidyverse, then we display the first 20 rows :   
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+
+# read the data and store it in the dataframe named dataset
+dataset <- read_csv("dataset (1).csv")
+
+```
+
+In this project we are using the [reactable](https://glin.github.io/reactable/) package to display all tables  
+
+```{r}
+
+# display using reactable with some options  
+reactable(dataset %>% head(20),
+          bordered = TRUE, highlight = TRUE, 
+          defaultColDef = colDef( headerStyle = list(background = "#4285F4")),
+          defaultPageSize = 4 )
+```
+
+
+lets check the colums types 
+
+```{r}
+# overview of tha data 
+glimpse(dataset)
+```
+
+at first sight we find : 
+
+- There is __60 168__  observations and __29__ columns 
+
+- The columns `date` and `time` are of type `charachter`, so we need to concactenat them then convert to `timestamp`
+
+- There is no ID column for the road : we need to create one. 
+
+- We identifie the column `Total Vehicles` as target variable 
+
+
+
+Let inspect the `road_name` variable and see the list of unique road names 
+
+```{r}
+
+
+dataset %>% 
+  distinct(road_name) %>%  # get distinct road name 
+  arrange(road_name) %>%  # order by names then display 
+  reactable(highlight = TRUE,defaultPageSize = 5, # display the dable 
+            defaultColDef = colDef( headerStyle = list(background = "#4285F4")))
+
+```
+
+As we can see this column contains 111 road name but we notice that some names are implicitly duplicated because of abbreviations and writing errors: for example : Abbotsford Street vs Abbottsford Street, Domain St vs Domain Street
+
+In total, we have identified 4 errors that we will correct manually, in biggest dataset we can use the Levenshtein distance or advanced NLP techniques can be used to do this work.  
+
+To process the dates we use the lubridate package
+
+We build our target variable y as the aggregation of road traffic per road and per hour
+
+
+```{r}
+dataset %>%
+  mutate(road_name= case_when(
+    road_name%in%c("Abbotsford Street", "Abbottsford Street")~"Abbottsford Street",  # equivalent if then 
+    road_name%in%c("Domain St", "Domain Street")~"Domain Street", # equivalent if then 
+    road_name%in%c("Stubbs street", "Stubbs Street")~"Stubbs Street", # equivalent if then 
+    road_name%in%c("Wells St", "Walsh Street")~"Walsh Street", # equivalent if then 
+    T~road_name # in all other cases render the correspanding road name 
+  ) ) %>%
+  mutate(date= dmy_hms(paste0(date, time)  )) %>% # create timestamp column using the function dmy_hms from lubridate and  paste0 allow concatenation of strings 
+  select(road_name, date, `Total Vehicles`) %>%  # selecting important columns 
+  group_by(road_name, date) %>%
+  summarise(y= sum(`Total Vehicles`,na.rm = T )) %>% # calculate target variable by road and date 
+  head(10) %>% # show only 10 first row 
+  reactable(highlight = T,defaultPageSize = 5, 
+            defaultColDef = colDef( headerStyle = list(background = "#4285F4")))
+```
+
+
+Now lets check the historical data for each road :
+
+-  we calculate the minimum and maximum date per route
+-  the number of hours expected between these two dates ( the diffrence in hours unite)
+-  the number of hours in the dataset 
+-  finnaly we select only roads with complete data ( `expected_rows`==`n_rows` )
+
+```{r eval=FALSE}
+dataset %>%
+  mutate(road_name= case_when(
+    road_name%in%c("Abbotsford Street", "Abbottsford Street")~"Abbottsford Street",  # equivalent if then 
+    road_name%in%c("Domain St", "Domain Street")~"Domain Street", # equivalent if then 
+    road_name%in%c("Stubbs street", "Stubbs Street")~"Stubbs Street", # equivalent if then 
+    road_name%in%c("Wells St", "Walsh Street")~"Walsh Street", # equivalent if then 
+    T~road_name # in all other cases render the correspanding road name 
+  ) ) %>%
+  mutate(date= dmy_hms(paste0(date, time)  )) %>% # create timestamp column using the function dmy_hms from lubridate and  paste0 allow concatenation of strings 
+  select(road_name, date, `Total Vehicles`) %>%  # selecting important columns 
+  group_by(road_name, date) %>%
+  summarise(y= sum(`Total Vehicles`,na.rm = T )) %>% # calculate target variable by road and date 
+  ungroup() %>%  # we ungroup the dataframe then group by road name 
+  group_by(road_name) %>% 
+  summarise(
+    min_date = min(date), # minimum date by road 
+    max_date = max(date), # maximum date by road 
+    n_rows = n() # total number of records 
+  ) %>% 
+  mutate(expected_rows =as.integer(difftime(max_date,min_date, units = "hours"))+1) %>% #expect number of hours 
+  filter(expected_rows==n_rows) -> clean_road # get only roads with complete data  and save the result in the dataframe clean_road 
+
+
+ 
+  
+```
+
+```{r}
+# display the clean dataframe 
+ reactable(clean_road,highlight = T,defaultPageSize = 5, 
+            defaultColDef = colDef( headerStyle = list(background = "#4285F4")))
+```
+
+
+## Visualiziation 
+
+After this first stage of data cleaning, we can visualize the temporal evolution of the traffic by road using the `apexchart` package and the `shiny` package to interaction purpose. 
+
+
+You can change the road using the selector in the top of the graph
+
+```{r echo=FALSE}
+
+df<- dataset %>%
+  mutate(road_name= case_when(
+    road_name%in%c("Abbotsford Street", "Abbottsford Street")~"Abbottsford Street",
+    road_name%in%c("Domain St", "Domain Street")~"Domain Street",
+    road_name%in%c("Stubbs street", "Stubbs Street")~"Stubbs Street",
+    road_name%in%c("Wells St", "Walsh Street")~"Walsh Street",
+    T~road_name
+  ) ) %>%
+  mutate(date=  dmy_hms(paste0(date, time)  )) %>% 
+  filter(road_name%in%clean_road$road_name) %>% # keep only the the road with clean data 
+  select(road_name, date, `Total Vehicles`) %>% 
+  group_by(road_name, date) %>%
+  summarise(y= sum(`Total Vehicles`,na.rm = T )) 
+
+# select input to choose the road name 
+fluidRow(
+    pickerInput(
+    inputId = "road_name",
+    label = "Choose a road name",
+    choices = unique(df$road_name)
+  )
+)
+
+# render the interactive plot 
+fluidRow(
+  apexchartOutput('plot',width = "100%")
+)
+
+
+# build the interactive chart 
+output$plot <- renderApexchart({
+  
+apex(data = df[df$road_name==input$road_name,] %>% mutate(date=as.POSIXct(date)),
+     type = "area", mapping = aes(x = date, y = y)) %>% 
+  ax_fill(
+          type='gradient',
+          gradient=list (
+            shadeIntensity= 1,
+            inverseColors=F,
+            opacityFrom=0.5,
+            opacityTo= 0,
+            stops= c(0, 90, 100)
+          )
+ 
+  )
+  
+    })
+```
+
+
+As we can see on the different graphs, the seasonality is very strong, and all the series seem stationary
+
+
+
+#  <i class="fas fa-chart-line"></i> Forecasting  {.tabset}
+
+
+In this part we will forecast traffic by road using __5 models__: `ARIMA`, `ETS`,  `SNAIVE`, `PROPHET` and the last one is the combinaison of all models.
+We will use the following packages :
+
+<div align="center" >
+<img src="packages.PNG"> 
+</div>
+
+
+
+- [fable](https://github.com/tidyverts/fable) : provides a collection of commonly used univariate and multivariate time series forecasting models including exponential smoothing via state space models and automatic ARIMA modelling. These models work within the fable framework, which provides the tools to evaluate, visualise, and combine models in a workflow consistent with the tidyverse.
+
+- [prophet](https://facebook.github.io/prophet/) : is open source software released by Facebook's Core Data Science team.It works best with time series that have strong seasonal effects and several seasons of historical data
+ 
+ 
+ 
+ We start by converting the data table to tsibble format and initiate a `future` with `multisession` plan to parallelize calculations 
+ 
+```{r eval=F}
+# setup parallel backend 
+library(future) 
+plan(multisession)
+```
+ 
+```{r eval=FALSE}
+# we convert the dataframe to a tsibble where the index is the date and the key id the road name 
+sdf <- df %>% 
+  ungroup() %>% 
+  as_tsibble(key = "road_name", index = 'date' )  
+
+```
+ 
+
+
+
+##  &#x1F4C8;  Single time series
+
+
+Although the _fable_ package is designed to handle many time series, we will be begin by demonstrating its use on a single time series. For this purpose, we will extract the traffic data of Agnes Street 
+
+```{r eval=FALSE}
+Agnes <- sdf %>%
+  filter(
+    road_name == "Agnes Street",
+  )
+```
+
+
+For this data set, we include all models  in a single call to the `model()` function like this.
+
+
+```{r eval=FALSE}
+Agnes %>% 
+  model(
+    arima = ARIMA(y), # fit best ARIMA model using auto.arima 
+    ets = ETS(y) , # fit the best ETS model
+    snaive = SNAIVE(y), # fit seasonal naive model 
+    prophet = prophet(y~ season("day")+season("week")+season("year")) # fit prophet with multiple seasons
+  ) %>% 
+  mutate(
+    mixed = (ets + arima  + snaive +prophet) / 4
+  )-> models
+```
+
+```{r}
+print(models) 
+```
+
+
+
+The returned object is called a _mable_ or model table, where each cell corresponds to a fitted model. Because we have only fitted models to one time series, this mable has only one row.
+
+To forecast all models, we pass the object to the `forecast` function with the horizon of 24 hours 
+
+```{r eval=FALSE}
+fc <- models %>%
+  forecast(h = 24)
+```
+
+
+
+```{r}
+print(fc)
+```
+
+The return object is a "fable" or forecast table with the following characteristics:
+
+- the __.model__ column becomes an additional key;
+- the __y__ column contains the estimated probability distribution of the response variable in future time periods;
+- the __.mean__ column contains the point forecasts equal to the mean of the probability distribution.
+
+Now, lets plot 24h forecasts provided by all models ( you can select/deselect models in the plot ) 
+
+```{r echo=FALSE}
+
+
+apex(data = fc %>% as.data.frame() %>% select(-y) %>%
+       mutate(.mean=round(.mean)) %>% 
+       rbind(Agnes %>% as.data.frame() %>% 
+               mutate(.model='historical') %>% 
+               rename( .mean=y)
+               ), type = "area", mapping = aes(x = date, y = .mean, group=.model)) %>% 
+  ax_fill(
+          type='gradient',
+          gradient=list (
+            shadeIntensity= 1,
+            inverseColors=F,
+            opacityFrom=0.5,
+            opacityTo= 0,
+            stops= c(0, 90, 100)
+          )
+ 
+  ) %>% 
+  ax_legend(position = "right") %>% 
+  ax_tooltip(
+      enabled= T,
+      shared= T
+  )
+
+
+```
+
+
+
+
+##  &#x26A1; All time  series
+
+
+To scale this up to include all series in the traffic data set requires no more work — we use exactly the same code.
+
+```{r eval=FALSE}
+
+
+sdf %>% 
+  model(
+    arima = ARIMA(y),
+    ets = ETS(y) ,
+    snaive = SNAIVE(y),
+    prophet = prophet(y~ season("day")+season("week")+season("year")),
+  ) %>% 
+  mutate(
+    mixed = (ets + arima + snaive +prophet) / 4
+  )-> all_models
+
+```
+
+
+Now the mable includes models for every road
+
+```{r}
+print(all_models)
+```
+
+
+
+```{r eval=FALSE}
+all_fc <- all_models %>%
+  forecast(h = 24)
+```
+
+
+```{r}
+print(all_fc)
+```
+
+
+```{r echo=FALSE}
+fluidRow(
+    pickerInput(
+    inputId = "road_name2",
+    label = "Choose a road name",
+    selected ="Abbottsford Street", 
+    choices = unique(df$road_name)
+  )
+)
+
+fluidRow(
+  apexchartOutput('plot2',width = "100%")
+)
+
+
+output$plot2 <- renderApexchart({
+
+apex(data = all_fc %>% as.data.frame() %>%
+       filter(road_name==input$road_name2) %>% 
+       select(-y) %>%
+       mutate(.mean=round(.mean)) %>% 
+       rbind(sdf %>% as.data.frame() %>% 
+               filter(road_name==input$road_name2) %>% 
+               mutate(.model='historical') %>% 
+               rename( .mean=y)
+               ), type = "area", mapping = aes(x = date, y = .mean, group=.model)) %>% 
+  ax_fill(
+          type='gradient',
+          gradient=list (
+            shadeIntensity= 1,
+            inverseColors=F,
+            opacityFrom=0.5,
+            opacityTo= 0,
+            stops= c(0, 90, 100)
+          )
+ 
+  ) %>% 
+  ax_legend(position = "right") %>% 
+  ax_tooltip(
+      enabled= T,
+      shared= T
+  )
+
+    })
+
+
+```
+
+
+
+
+
+##  &#x1F3AF; Accuracy calculations
+
+
+<div align="center" >
+<img src="traintest.PNG"> 
+</div>
+
+To compare the forecast accuracy of these models, we will create a training data set containing all data except the last 24 hours. We will then forecast the remaining hours in the data set and compare the results with the actual values.
+
+
+
+```{r eval=FALSE}
+
+sdf %>% 
+  group_by(road_name) %>% 
+  slice(1:(n()-24)) %>%  # train the models in the data exept the last 24 hours 
+  ungroup() %>% 
+  model(
+    arima = ARIMA(y),
+    ets = ETS(y) ,
+    snaive= SNAIVE(y),
+    prophet = prophet(y~ season("day")+season("week")+season("year"))
+  ) %>% 
+  mutate(
+    mixed = (ets + arima + snaive +prophet) / 4
+  )-> models_train
+
+
+# Forecast the remaning 24 hours in each road 
+fabletools::forecast( object = models_train, sdf %>% 
+                        group_by(road_name) %>% 
+                        slice((n()-24):n()) %>% ungroup() ) -> fc_train
+
+
+
+
+```
+
+
+
+```{r echo=FALSE}
+
+# choosing the road interactively 
+fluidRow(
+    pickerInput(
+    inputId = "road_name3",
+    label = "Choose a road name",
+    selected ="Abbottsford Street", 
+    choices = unique(df$road_name)
+  )
+)
+
+fluidRow(
+  apexchartOutput('plot3',width = "100%")
+)
+
+
+output$plot3 <- renderApexchart({
+
+apex(data = fc_train %>% as.data.frame() %>%
+       filter(road_name==input$road_name3) %>% 
+       select(-y) %>%
+       mutate(.mean=round(.mean)) %>% 
+       rbind(sdf %>%
+               ungroup() %>% 
+               as.data.frame() %>% 
+               filter(road_name==input$road_name3) %>% 
+               mutate(.model='historical') %>% 
+               rename( .mean=y)
+               ), type = "area", mapping = aes(x = date, y = .mean, group=.model)) %>% 
+  ax_fill(
+          type='gradient',
+          gradient=list (
+            shadeIntensity= 1,
+            inverseColors=F,
+            opacityFrom=0.5,
+            opacityTo= 0,
+            stops= c(0, 90, 100)
+          )
+ 
+  ) %>% 
+  ax_legend(position = "right") %>% 
+  ax_tooltip(
+      enabled= T,
+      shared= T
+  )
+
+    })
+```
+
+
+
+### Forecast errors
+
+
+Now to check the accuracy, we use the `accuracy()` function. 
+
+A forecast "error" is the difference between an observed value and its forecast. Here "error" does not mean a mistake, it means the unpredictable part of an observation. 
+
+We can measure forecast accuracy by summarising the forecast errors in different ways.
+
+The two most commonly used scale-dependent measures are based on the absolute errors or squared errors:
+Mean absolute error: __MAE__ and Root mean squared error: __RMSE__
+
+When comparing forecast methods applied to a single time series, or to several time series with the same units, the MAE is popular as it is easy to both understand and compute. A forecast method that minimises the MAE will lead to forecasts of the median, while minimising the RMSE will lead to forecasts of the mean. Consequently, the RMSE is also widely used, despite being more difficult to interpret.
+
+__Percentage errors__
+The Percentage errors have the advantage of being unit-free, and so are frequently used to compare forecast performances between data sets. 
+Measures based on percentage errors have the disadvantage of being infinite or undefined if $yt=0$ for any $t$ in the period of interest, and having extreme values if any $yt$ is close to zero.
+
+
+```{r eval=F}
+fabletools::accuracy(fc_train, sdf) %>% select( .model, road_name, .type, RMSE, MAE, MAPE)  -> res 
+```
+
+You can filter road and get the metrics by typing the name in `search`  
+
+```{r}
+reactable(
+  res %>% mutate(MAE= round(MAE, 2),RMSE= round(RMSE, 2)) %>% arrange(road_name), 
+  defaultColDef = colDef( headerStyle = list(background = "#4285F4")),
+  searchable = T,defaultPageSize = 5,highlight = T)
+```
+
+
