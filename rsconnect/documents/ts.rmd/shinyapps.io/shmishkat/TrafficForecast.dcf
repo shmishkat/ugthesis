@@ -1,0 +1,14 @@
+name: TrafficForecast
+title: TrafficForecast
+username:
+account: shmishkat
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 4383270
+bundleId: 4817242
+url: https://shmishkat.shinyapps.io/TrafficForecast/
+when: 1626230981.98688
+lastSyncTime: 1626230981.9869
+asMultiple: FALSE
+asStatic: FALSE
+additionalFiles: packages.png|traintest.png

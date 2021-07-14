@@ -72,7 +72,10 @@ load("my_work_space.RData")
 
 <!-- include the image in introduction --> 
 <div 
-    style="background-image: url('https://encrypted-tbn0.gstatic.com/images?q=tbn%3AANd9GcSrglCCiJlqlWoC4KEmwK7bfLfEI3boyX93kA&usqp=CAU'); 
+<div align="center" >
+<img src="coverimage.png"> 
+</div>
+<div 
 background-repeat: no-repeat;
     background-size: cover;
     background-position: center center;
@@ -287,7 +290,7 @@ In this part we will forecast traffic by road using __5 models__: `ARIMA`, `ETS`
 We will use the following packages :
 
 <div align="center" >
-<img src="packages.PNG"> 
+<img src="packages.png"> 
 </div>
 
 
@@ -504,7 +507,7 @@ apex(data = all_fc %>% as.data.frame() %>%
 
 
 <div align="center" >
-<img src="traintest.PNG"> 
+<img src="traintest.png"> 
 </div>
 
 To compare the forecast accuracy of these models, we will create a training data set containing all data except the last 24 hours. We will then forecast the remaining hours in the data set and compare the results with the actual values.
